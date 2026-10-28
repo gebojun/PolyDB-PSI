@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tg UMAP interactive display</title>
+<style>
+:root { color-scheme: light; --ink:#17202a; --muted:#68717d; --line:#d9dee5; --panel:#ffffff; --bg:#f4f6f8; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font-family:Arial,"Microsoft YaHei",sans-serif; }
+.wrap { max-width:1800px; margin:0 auto; padding:20px; }
+h1 { margin:0 0 5px; font-size:24px; }
+.sub { color:var(--muted); margin-bottom:16px; font-size:13px; }
+.controls { display:grid; grid-template-columns:repeat(4,minmax(190px,1fr)); gap:14px; margin-bottom:14px; }
+.group { background:var(--panel); border:1px solid var(--line); padding:12px; }
+.group h2 { margin:0 0 10px; font-size:14px; }
+label { display:flex; align-items:center; gap:8px; font-size:12px; margin:7px 0; }
+input[type=range] { width:100%; accent-color:#2673b9; }
+input[type=color] { width:28px; height:22px; padding:0; border:0; background:transparent; }
+output { min-width:45px; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+select { width:100%; padding:5px; border:1px solid var(--line); background:#fff; }
+.checks { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:8px; }
+.class-row { display:grid; grid-template-columns:20px 1fr 28px; align-items:center; gap:5px; }
+.legend-note { font-size:11px; color:var(--muted); line-height:1.35; }
+.figures { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.figure { background:var(--panel); border:1px solid var(--line); padding:8px; min-width:0; }
+.figure h2 { margin:2px 5px 6px; text-align:center; font-size:16px; }
+canvas { width:100%; height:auto; display:block; background:#fcfcfd; }
+.status { color:var(--muted); font-size:12px; margin:10px 2px 0; }
+button { border:1px solid var(--line); background:#fff; padding:6px 9px; cursor:pointer; }
+button:hover { background:#eef4fa; }
+@media(max-width:1000px) { .controls{grid-template-columns:repeat(2,minmax(190px,1fr));} .figures{grid-template-columns:1fr;} }
+@media(max-width:600px) { .wrap{padding:10px;} .controls{grid-template-columns:1fr;} .checks{grid-template-columns:1fr 1fr;} }
+</style>
+</head>
+<body>
+<main class="wrap">
+<h1>Tg 结构空间与逐聚合物可靠性</h1>
+<div class="sub">每个点对应一个聚合物。右图颜色是该聚合物 Tg 填补格的 PSI；没有进行网格聚合或性质级汇总。</div>
+<section class="controls">
+  <div class="group">
+    <h2>布局与裁剪</h2>
+    <label>UMAP 布局<select id="layout"></select></label>
+    <label>轴向裁剪 <input id="crop" type="range" min="0" max="0.18" step="0.01" value="0.05"><output id="cropOut"></output></label>
+    <div class="legend-note">切换的是已经计算好的 MACCS–UMAP 坐标；改变布局不会改变 PSI。</div>
+  </div>
+  <div class="group">
+    <h2>点与透明度</h2>
+    <label>点面积 <input id="point" type="range" min="0.5" max="30" step="0.5" value="5"><output id="pointOut"></output></label>
+    <label>类别点透明度 <input id="classAlpha" type="range" min="0.05" max="1" step="0.05" value="0.86"><output id="classAlphaOut"></output></label>
+    <label>观测点透明度 <input id="obsAlpha" type="range" min="0.05" max="1" step="0.05" value="0.34"><output id="obsAlphaOut"></output></label>
+    <label>PSI 点透明度 <input id="psiAlpha" type="range" min="0.05" max="1" step="0.05" value="0.86"><output id="psiAlphaOut"></output></label>
+  </div>
+  <div class="group">
+    <h2>显示与 PSI 色标</h2>
+    <div class="checks">
+      <label><input id="showObserved" type="checkbox" checked> 观测 Tg</label>
+      <label><input id="showPrediction" type="checkbox" checked> Tg 预测</label>
+      <label><input id="showUnscored" type="checkbox" checked> 未评分缺失</label>
+    </div>
+    <label>PSI 下限 <input id="psiMin" type="range" min="0" max="0.95" step="0.01" value="0.5"><output id="psiMinOut"></output></label>
+    <label>PSI 上限 <input id="psiMax" type="range" min="0.05" max="1" step="0.01" value="1"><output id="psiMaxOut"></output></label>
+    <div class="legend-note">低于下限的 PSI 使用色条低端颜色，高于上限使用高端颜色。</div>
+  </div>
+  <div class="group">
+    <h2>类别勾选与图例颜色</h2>
+    <div id="classControls"></div>
+    <div class="legend-note">默认显示数量最多的 12 类；取消勾选只影响左图，右图仍显示全部聚合物。</div>
+  </div>
+</section>
+<section class="figures">
+  <div class="figure"><h2>聚合物类别</h2><canvas id="classCanvas" width="1300" height="760"></canvas></div>
+  <div class="figure"><h2>Tg 填补可靠性</h2><canvas id="psiCanvas" width="1300" height="760"></canvas></div>
+</section>
+<div class="status" id="status"></div>
+</main>
+<script>
+const DATA = __TG_DATA_JSON__;
+const $ = id => document.getElementById(id);
+const defaults = {
+  "Polyimide":"#6f2da8", "Polyurethane":"#e66101", "Polyamide":"#1f77b4", "Polyester":"#2ca02c",
+  "Polycarbonate":"#d4a017", "Polyether":"#8c564b", "Polysulfone":"#d81b60", "Polysiloxane":"#00a6a6",
+  "Polyolefin":"#7a8b00", "Fluoropolymer":"#003f5c", "Polyacrylate":"#e41a1c", "Polystyrene":"#ff7fad",
+  "Mixed/unclear":"#a7abb0"
+};
+const state = { colors:{...defaults}, enabled:new Set(DATA.top_classes) };
+const layout = $("layout");
+Object.keys(DATA.layouts).forEach((name, i) => { const o=document.createElement("option"); o.value=name; o.textContent=name; layout.appendChild(o); if(i===2) o.selected=true; });
+const classControls=$("classControls");
+DATA.top_classes.forEach(name => {
+  const row=document.createElement("div"); row.className="class-row";
+  row.innerHTML=`<input type="checkbox" checked data-class="${name}"><span>${name}</span><input type="color" value="${state.colors[name]}" data-color="${name}">`;
+  classControls.appendChild(row);
+  row.querySelector("input[type=checkbox]").addEventListener("input", e => { e.target.checked ? state.enabled.add(name) : state.enabled.delete(name); draw(); });
+  row.querySelector("input[type=color]").addEventListener("input", e => { state.colors[name]=e.target.value; draw(); });
+});
+const controls=["crop","point","classAlpha","obsAlpha","psiAlpha","psiMin","psiMax"];
+function fmt(id,v){ $(id+"Out").textContent = id==="point" ? `${Number(v).toFixed(1)} pt²` : `${Number(v).toFixed(2)}`; }
+controls.forEach(id=>{ fmt(id,$(id).value); $(id).addEventListener("input",()=>{fmt(id,$(id).value); if(id==="psiMin" && +$("psiMin").value>+$("psiMax").value) $("psiMax").value=$("psiMin").value; if(id==="psiMax" && +$("psiMax").value<+$("psiMin").value) $("psiMin").value=$("psiMax").value; draw(); }); });
+["layout","showObserved","showPrediction","showUnscored"].forEach(id=>$(id).addEventListener("input",draw));
+function rgba(hex,a){ const n=parseInt(hex.slice(1),16); return `rgba(${n>>16},${n>>8&255},${n&255},${a})`; }
+function colorScale(v,lo,hi){
+  const t=Math.max(0,Math.min(1,(v-lo)/(hi-lo||1)));
+  const stops=[[0,[178,24,43]],[.25,[239,138,98]],[.5,[254,224,139]],[.75,[166,217,106]],[1,[27,120,55]]];
+  for(let i=1;i<stops.length;i++){if(t<=stops[i][0]){const a=stops[i-1],b=stops[i],q=(t-a[0])/(b[0]-a[0]);const c=a[1].map((x,j)=>Math.round(x+(b[1][j]-x)*q));return `rgb(${c[0]},${c[1]},${c[2]})`;}}
+  return "rgb(27,120,55)";
+}
+function extent(values, crop){ const a=values.slice().sort((x,y)=>x-y); const lo=a[Math.floor(a.length*crop)], hi=a[Math.floor(a.length*(1-crop))-1]; return [lo,hi]; }
+function setupCanvas(canvas, xs, ys, crop){
+  const ctx=canvas.getContext("2d"), dpr=window.devicePixelRatio||1, W=canvas.width, H=canvas.height;
+  ctx.setTransform(dpr,0,0,dpr,0,0); canvas.style.aspectRatio=`${W}/${H}`;
+  const xspan=extent(xs,crop), yspan=extent(ys,crop), m={l:72,r:74,t:24,b:58};
+  const x0=m.l,x1=W-m.r,y0=H-m.b,y1=m.t;
+  const sx=x=>(x-xspan[0])/(xspan[1]-xspan[0])*(x1-x0)+x0, sy=y=>y1-(y-yspan[0])/(yspan[1]-yspan[0])*(y1-y0);
+  ctx.clearRect(0,0,W,H); ctx.fillStyle="#fcfcfd"; ctx.fillRect(0,0,W,H); ctx.strokeStyle="#c9cdd3"; ctx.lineWidth=1;
+  for(let i=0;i<6;i++){const xx=x0+i*(x1-x0)/5, yy=y0-i*(y0-y1)/5; ctx.globalAlpha=.38; ctx.beginPath();ctx.moveTo(xx,y1);ctx.lineTo(xx,y0);ctx.moveTo(x0,yy);ctx.lineTo(x1,yy);ctx.stroke();ctx.globalAlpha=1;}
+  ctx.strokeStyle="#5e6268"; ctx.strokeRect(x0,y1,x1-x0,y0-y1); ctx.fillStyle="#20252b"; ctx.font="16px Arial"; ctx.textAlign="center"; ctx.fillText("UMAP 1",(x0+x1)/2,H-15); ctx.save();ctx.translate(18,(y0+y1)/2);ctx.rotate(-Math.PI/2);ctx.fillText("UMAP 2",0,0);ctx.restore();
+  return {ctx,sx,sy,x0,x1,y0,y1,W,H};
+}
+function draw(){
+  const selected=DATA.layouts[layout.value], xs=selected.x, ys=selected.y, crop=+$('crop').value, point=+$('point').value;
+  const classPlot=setupCanvas($("classCanvas"),xs,ys,crop), psiPlot=setupCanvas($("psiCanvas"),xs,ys,crop);
+  const ids=DATA.class_ids, cls=DATA.classes;
+  for(let i=0;i<DATA.n;i++){const name=cls[ids[i]]; if(!state.enabled.has(name)) continue; classPlot.ctx.fillStyle=rgba(state.colors[name]||"#a7abb0",name==="Mixed/unclear"?.42:+$("classAlpha").value); classPlot.ctx.beginPath();classPlot.ctx.arc(classPlot.sx(xs[i]),classPlot.sy(ys[i]),Math.sqrt(point/Math.PI),0,Math.PI*2);classPlot.ctx.fill();}
+  const showObs=$("showObserved").checked, showPred=$("showPrediction").checked, showUnscored=$("showUnscored").checked, lo=+$('psiMin').value, hi=+$('psiMax').value;
+  for(let i=0;i<DATA.n;i++){
+    const score=DATA.psi[i], observed=DATA.observed[i]===1;
+    if(observed){ if(!showObs) continue; psiPlot.ctx.fillStyle=rgba("#b7bcc3",+$('obsAlpha').value); }
+    else if(score!==null){ if(!showPred) continue; psiPlot.ctx.fillStyle=rgba(colorScale(score,lo,hi),+$('psiAlpha').value); }
+    else { if(!showUnscored) continue; psiPlot.ctx.strokeStyle=rgba("#777d85",.75); psiPlot.ctx.lineWidth=1; psiPlot.ctx.beginPath(); const x=psiPlot.sx(xs[i]),y=psiPlot.sy(ys[i]),r=Math.sqrt(point/Math.PI);psiPlot.ctx.moveTo(x-r,y-r);psiPlot.ctx.lineTo(x+r,y+r);psiPlot.ctx.moveTo(x+r,y-r);psiPlot.ctx.lineTo(x-r,y+r);psiPlot.ctx.stroke(); continue; }
+    psiPlot.ctx.beginPath();psiPlot.ctx.arc(psiPlot.sx(xs[i]),psiPlot.sy(ys[i]),Math.sqrt(point/Math.PI),0,Math.PI*2);psiPlot.ctx.fill();
+  }
+  drawColorbar(psiPlot,lo,hi); updateStatus(xs,ys);
+}
+function drawColorbar(p,lo,hi){ const ctx=p.ctx,x=p.W-45,y=p.y1,w=16,h=p.y0-p.y1; for(let i=0;i<h;i++){ctx.fillStyle=colorScale(hi-(i/h)*(hi-lo),lo,hi);ctx.fillRect(x,y+i,w,1);} ctx.strokeStyle="#555";ctx.strokeRect(x,y,w,h);ctx.fillStyle="#20252b";ctx.font="12px Arial";ctx.textAlign="left";[hi,(hi+lo)/2,lo].forEach((v,j)=>ctx.fillText(v.toFixed(2),x+22,y+j*h/2+4));ctx.save();ctx.translate(x+54,y+h/2);ctx.rotate(-Math.PI/2);ctx.textAlign="center";ctx.fillText("Tg PSI",0,0);ctx.restore();}
+function updateStatus(xs,ys){ const n=DATA.n, scored=DATA.psi.reduce((s,x)=>s+(x!==null?1:0),0); $("status").textContent=`${n.toLocaleString()} 个聚合物；Tg 观测 ${DATA.observed.reduce((a,b)=>a+b,0).toLocaleString()}；Tg PSI 已评分 ${scored.toLocaleString()}；当前布局 ${layout.value}；当前裁剪 ${(+$("crop").value*100).toFixed(0)}%/轴。`;
+}
+window.addEventListener("resize",draw); draw();
+</script>
+</body>
+</html>
